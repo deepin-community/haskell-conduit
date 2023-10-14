@@ -62,6 +62,7 @@ module Data.Conduit.Combinators
     , foldlE
     , foldMap
     , foldMapE
+    , foldWhile
     , all
     , allE
     , any
@@ -1755,6 +1756,19 @@ mapAccumWhileC f =
 {-# INLINE mapAccumWhileC #-}
 STREAMING(mapAccumWhile, mapAccumWhileC, mapAccumWhileS, f s)
 
+
+-- | Specialized version of 'mapAccumWhile' that does not provide values downstream.
+--
+-- @since 1.3.4
+foldWhile :: Monad m => (a -> s -> Either e s) -> s -> ConduitT a o m (Either e s)
+foldWhile f = loop
+  where
+    loop !s = await >>= maybe (return $ Right s) go
+      where
+        go a = either (return . Left $!) loop $ f a s
+{-# INLINE foldWhile #-}
+
+
 -- | 'concatMap' with an accumulator.
 --
 -- Subject to fusion
@@ -1819,7 +1833,7 @@ chunksOfExactlyE :: (Monad m, Seq.IsSequence seq) => Seq.Index seq -> ConduitT s
 chunksOfExactlyE chunkSize = await >>= maybe (return ()) start
     where
         start b
-            | onull b = chunksOfE chunkSize
+            | onull b = chunksOfExactlyE chunkSize
             | Seq.lengthIndex b < chunkSize = continue (Seq.lengthIndex b) [b]
             | otherwise = let (first,rest) = Seq.splitAt chunkSize b in
                             yield first >> start rest
@@ -2417,7 +2431,7 @@ reuseBuffer (Buffer fpbuf _ _ ope) = Buffer fpbuf p0 p0 ope
 -- Under the surface, this function uses a number of tricks to get high
 -- performance. For more information on both usage and implementation,
 -- please see:
--- <https://www.fpcomplete.com/user/snoyberg/library-documentation/vectorbuilder>
+-- <https://www.schoolofhaskell.com/user/snoyberg/library-documentation/vectorbuilder>
 --
 -- @since 1.3.0
 vectorBuilder :: (PrimMonad m, PrimMonad n, V.Vector v e, PrimState m ~ PrimState n)

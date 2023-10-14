@@ -24,6 +24,7 @@ import qualified Data.List.Split as DLS (chunksOf)
 import Control.Monad.ST (runST)
 import Data.Monoid
 import qualified Data.IORef as I
+import Data.Tuple (swap)
 import Control.Monad.Trans.Resource (allocate, resourceForkIO)
 import Control.Concurrent (threadDelay, killThread)
 import Control.Monad.IO.Class (liftIO)
@@ -51,6 +52,16 @@ import qualified Spec
 equivToList :: Eq b => ([a] -> [b]) -> ConduitT a b Identity () -> [a] -> Bool
 equivToList f conduit xs =
   f xs == runConduitPure (CL.sourceList xs .| conduit .| CL.consume)
+
+-- | Check that two conduits produce the same outputs and return the same result.
+bisimilarTo :: (Eq a, Eq r) => ConduitT () a Identity r -> ConduitT () a Identity r -> Bool
+left `bisimilarTo` right =
+    C.runConduitPure (toListRes left) == C.runConduitPure (toListRes right)
+  where
+    -- | Sink a conduit into a list and return it alongside the result.
+    -- So it is, essentially, @sinkList@ plus result.
+    toListRes :: Monad m => ConduitT () a m r -> ConduitT () Void m ([a], r)
+    toListRes cond = swap <$> C.fuseBoth cond CL.consume
 
 
 main :: IO ()
@@ -166,6 +177,28 @@ main = hspec $ do
             let y = DL.unfoldr f seed
             x `shouldBe` y
 
+    describe "uncons" $ do
+        prop "folds to list" $ \xs ->
+          let src = C.sealConduitT $ CL.sourceList xs in
+          (xs :: [Int]) == DL.unfoldr CL.uncons src
+
+        prop "works with unfold" $ \xs ->
+          let src = CL.sourceList xs in
+          CL.unfold CL.uncons (C.sealConduitT src) `bisimilarTo` (src :: ConduitT () Int Identity ())
+
+    describe "unconsEither" $ do
+        let
+          eitherToMaybe :: Either l a -> Maybe a
+          eitherToMaybe (Left _) = Nothing
+          eitherToMaybe (Right a) = Just a
+        prop "folds outputs to list" $ \xs ->
+          let src = C.sealConduitT $ CL.sourceList xs in
+          (xs :: [Int]) == DL.unfoldr (eitherToMaybe . CL.unconsEither) src
+
+        prop "works with unfoldEither" $ \(xs, r) ->
+          let src = CL.sourceList xs *> pure r in
+          CL.unfoldEither CL.unconsEither (C.sealConduitT src) `bisimilarTo` (src :: ConduitT () Int Identity Int)
+
     describe "Monoid instance for Source" $ do
         it "mappend" $ do
             x <- runConduitRes $ (CL.sourceList [1..5 :: Int] `mappend` CL.sourceList [6..10]) .| CL.fold (+) 0
@@ -231,7 +264,7 @@ main = hspec $ do
             x <- runConduitRes $
                 CI.ConduitT
                     ((CI.unConduitT (CL.sourceList [1..10]) CI.Done
-                    CI.>+> CI.injectLeftovers (flip CI.unConduitT CI.Done $ CL.map (* 2))) >>=)
+                    CI.>+> CI.injectLeftovers ((\c -> c `CI.unConduitT` CI.Done) $ CL.map (* 2))) >>=)
                     .| CL.fold (+) 0
             x `shouldBe` 2 * sum [1..10 :: Int]
 
@@ -547,8 +580,8 @@ main = hspec $ do
             y <- runConduit $ CL.sourceList [1..10 :: Int] .| CL.fold (+) 0
             x `shouldBe` y
         it' "right identity" $ do
-            x <- CI.runPipe $ mapM_ CI.yield [1..10 :: Int] CI.>+> (CI.injectLeftovers $ flip CI.unConduitT CI.Done $ CL.fold (+) 0) CI.>+> CI.idP
-            y <- CI.runPipe $ mapM_ CI.yield [1..10 :: Int] CI.>+> (CI.injectLeftovers $ flip CI.unConduitT CI.Done $ CL.fold (+) 0)
+            x <- CI.runPipe $ mapM_ CI.yield [1..10 :: Int] CI.>+> (CI.injectLeftovers $ (\c -> c `CI.unConduitT` CI.Done) $ CL.fold (+) 0) CI.>+> CI.idP
+            y <- CI.runPipe $ mapM_ CI.yield [1..10 :: Int] CI.>+> (CI.injectLeftovers $ (\c -> c `CI.unConduitT` CI.Done) $ CL.fold (+) 0)
             x `shouldBe` y
 
     describe "generalizing" $ do
@@ -597,7 +630,7 @@ main = hspec $ do
     describe "injectLeftovers" $ do
         it "works" $ do
             let src = mapM_ CI.yield [1..10 :: Int]
-                conduit = CI.injectLeftovers $ flip CI.unConduitT CI.Done $ C.awaitForever $ \i -> do
+                conduit = CI.injectLeftovers $ (\c -> c `CI.unConduitT` CI.Done) $ C.awaitForever $ \i -> do
                     js <- CL.take 2
                     mapM_ C.leftover $ reverse js
                     C.yield i
@@ -716,8 +749,8 @@ main = hspec $ do
         describe "WriterT" $
             it "pass" $
                 let writer = W.pass $ do
-                    W.tell [1 :: Int]
-                    pure ((), (2:))
+                      W.tell [1 :: Int]
+                      pure ((), (2:))
                 in execWriter (runConduit writer) `shouldBe` [2, 1]
 
     describe "Data.Conduit.Lift" $ do

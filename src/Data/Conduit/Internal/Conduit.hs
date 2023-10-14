@@ -38,6 +38,8 @@ module Data.Conduit.Internal.Conduit
     , runConduitRes
     , fuse
     , connect
+    , unconsM
+    , unconsEitherM
       -- ** Composition
     , connectResume
     , connectResumeConduit
@@ -106,7 +108,7 @@ import Data.Void (Void, absurd)
 import Data.Monoid (Monoid (mappend, mempty))
 import Data.Semigroup (Semigroup ((<>)))
 import Control.Monad.Trans.Resource
-import Data.Conduit.Internal.Pipe hiding (yield, mapOutput, leftover, yieldM, await, awaitForever, bracketP)
+import Data.Conduit.Internal.Pipe hiding (yield, mapOutput, leftover, yieldM, await, awaitForever, bracketP, unconsM, unconsEitherM)
 import qualified Data.Conduit.Internal.Pipe as CI
 import Control.Monad (forever)
 import Data.Traversable (Traversable (..))
@@ -146,6 +148,8 @@ instance Applicative (ConduitT i o m) where
     {-# INLINE pure #-}
     (<*>) = ap
     {-# INLINE (<*>) #-}
+    (*>) = (>>)
+    {-# INLINE (*>) #-}
 
 instance Monad (ConduitT i o m) where
     return = pure
@@ -325,9 +329,9 @@ connectResume (SealedConduitT left0) (ConduitT right0) =
       where
         recurse = goLeft rp rc
 
-sourceToPipe :: Monad m => Source m o -> Pipe l i o u m ()
-sourceToPipe =
-    go . flip unConduitT Done
+sourceToPipe :: Monad m => ConduitT () o m () -> Pipe l i o u m ()
+sourceToPipe (ConduitT k) =
+    go $ k Done
   where
     go (HaveOutput p o) = HaveOutput (go p) o
     go (NeedInput _ c) = go $ c ()
@@ -335,9 +339,9 @@ sourceToPipe =
     go (PipeM mp) = PipeM (liftM go mp)
     go (Leftover p ()) = go p
 
-sinkToPipe :: Monad m => Sink i m r -> Pipe l i o u m r
-sinkToPipe =
-    go . injectLeftovers . flip unConduitT Done
+sinkToPipe :: Monad m => ConduitT i Void m r -> Pipe l i o u m r
+sinkToPipe (ConduitT k) =
+    go $ injectLeftovers $ k Done
   where
     go (HaveOutput _ o) = absurd o
     go (NeedInput p c) = NeedInput (go . p) (const $ go $ c ())
@@ -345,9 +349,9 @@ sinkToPipe =
     go (PipeM mp) = PipeM (liftM go mp)
     go (Leftover _ l) = absurd l
 
-conduitToPipe :: Monad m => Conduit i m o -> Pipe l i o u m ()
-conduitToPipe =
-    go . injectLeftovers . flip unConduitT Done
+conduitToPipe :: Monad m => ConduitT i o m () -> Pipe l i o u m ()
+conduitToPipe (ConduitT k) =
+    go $ injectLeftovers $ k Done
   where
     go (HaveOutput p o) = HaveOutput (go p) o
     go (NeedInput p c) = NeedInput (go . p) (const $ go $ c ())
@@ -358,7 +362,7 @@ conduitToPipe =
 -- | Generalize a 'Source' to a 'Producer'.
 --
 -- Since 1.0.0
-toProducer :: Monad m => Source m a -> Producer m a
+toProducer :: Monad m => ConduitT () a m () -> ConduitT i a m ()
 toProducer (ConduitT c0) = ConduitT $ \rest -> let
     go (HaveOutput p o) = HaveOutput (go p) o
     go (NeedInput _ c) = go (c ())
@@ -370,7 +374,7 @@ toProducer (ConduitT c0) = ConduitT $ \rest -> let
 -- | Generalize a 'Sink' to a 'Consumer'.
 --
 -- Since 1.0.0
-toConsumer :: Monad m => Sink a m b -> Consumer a m b
+toConsumer :: Monad m => ConduitT a Void m b -> ConduitT a o m b
 toConsumer (ConduitT c0) = ConduitT $ \rest -> let
     go (HaveOutput _ o) = absurd o
     go (NeedInput p c) = NeedInput (go . p) (go . c)
@@ -399,8 +403,9 @@ catchC :: (MonadUnliftIO m, Exception e)
        -> ConduitT i o m r
 catchC (ConduitT p0) onErr = ConduitT $ \rest -> let
     go (Done r) = rest r
-    go (PipeM mp) = PipeM $ withRunInIO $ \run -> E.catch (run (liftM go mp))
-        (return . flip unConduitT rest . onErr)
+    go (PipeM mp) = PipeM $ withRunInIO $ \ run ->
+      run (liftM go mp) `E.catch` \ e ->
+        return $ onErr e `unConduitT` rest
     go (Leftover p i) = Leftover (go p) i
     go (NeedInput x y) = NeedInput (go . x) (go . y)
     go (HaveOutput p o) = HaveOutput (go p) o
@@ -433,7 +438,7 @@ tryC c = fmap Right c `catchC` (return . Left)
 -- Any leftovers are discarded.
 --
 -- Since 0.4.1
-zipSinks :: Monad m => Sink i m r -> Sink i m r' -> Sink i m (r, r')
+zipSinks :: Monad m => ConduitT i Void m r -> ConduitT i Void m r' -> ConduitT i Void m (r, r')
 zipSinks (ConduitT x0) (ConduitT y0) = ConduitT $ \rest -> let
     Leftover _  i    >< _                = absurd i
     _                >< Leftover _  i    = absurd i
@@ -452,7 +457,7 @@ zipSinks (ConduitT x0) (ConduitT y0) = ConduitT $ \rest -> let
 --   source has been exhausted.
 --
 -- Since 1.0.13
-zipSources :: Monad m => Source m a -> Source m b -> Source m (a, b)
+zipSources :: Monad m => ConduitT () a m () -> ConduitT () b m () -> ConduitT () (a, b) m ()
 zipSources (ConduitT left0) (ConduitT right0) = ConduitT $ \rest -> let
     go (Leftover left ()) right = go left right
     go left (Leftover right ())  = go left right
@@ -473,7 +478,7 @@ zipSources (ConduitT left0) (ConduitT right0) = ConduitT $ \rest -> let
 --   source has been exhausted.
 --
 -- Since 1.0.13
-zipSourcesApp :: Monad m => Source m (a -> b) -> Source m a -> Source m b
+zipSourcesApp :: Monad m => ConduitT () (a -> b) m () -> ConduitT () a m () -> ConduitT () b m ()
 zipSourcesApp (ConduitT left0) (ConduitT right0) = ConduitT $ \rest -> let
     go (Leftover left ()) right = go left right
     go left (Leftover right ())  = go left right
@@ -598,11 +603,11 @@ connectResumeConduit (SealedConduitT left0) (ConduitT right0) = ConduitT $ \rest
 -- The new conduit will stop processing once either source or upstream have been exhausted.
 mergeSource
   :: Monad m
-  => Source m i
-  -> Conduit a m (i, a)
+  => ConduitT () i m ()
+  -> ConduitT a (i, a) m ()
 mergeSource = loop . sealConduitT
   where
-    loop :: Monad m => SealedConduitT () i m () -> Conduit a m (i, a)
+    loop :: Monad m => SealedConduitT () i m () -> ConduitT a (i, a) m ()
     loop src0 = await >>= maybe (return ()) go
       where
         go a = do
@@ -626,9 +631,9 @@ mergeSource = loop . sealConduitT
 --
 -- Since 1.1.0
 passthroughSink :: Monad m
-                => Sink i m r
+                => ConduitT i Void m r
                 -> (r -> m ()) -- ^ finalizer
-                -> Conduit i m i
+                -> ConduitT i i m ()
 passthroughSink (ConduitT sink0) final = ConduitT $ \rest -> let
     -- A bit of explanation is in order, this function is
     -- non-obvious. The purpose of go is to keep track of the sink
@@ -686,13 +691,13 @@ passthroughSink (ConduitT sink0) final = ConduitT $ \rest -> let
 -- However, @sourceToList@ is able to produce its results lazily, which cannot
 -- be done when running a conduit pipeline in general. Unlike the
 -- @Data.Conduit.Lazy@ module (in conduit-extra), this function performs no
--- unsafe I\/O operations, and therefore can only be as lazily as the
+-- unsafe I\/O operations, and therefore can only be as lazy as the
 -- underlying monad.
 --
 -- Since 1.2.6
-sourceToList :: Monad m => Source m a -> m [a]
-sourceToList =
-    go . flip unConduitT Done
+sourceToList :: Monad m => ConduitT () a m () -> m [a]
+sourceToList (ConduitT k) =
+    go $ k Done
   where
     go (Done _) = return []
     go (HaveOutput src x) = liftM (x:) (go src)
@@ -720,13 +725,47 @@ connect :: Monad m
         -> m r
 connect = ($$)
 
+-- | Split a conduit into head and tail.
+--
+-- Note that you have to 'sealConduitT' it first.
+--
+-- Since 1.3.3
+unconsM :: Monad m
+        => SealedConduitT () o m ()
+        -> m (Maybe (o, SealedConduitT () o m ()))
+unconsM (SealedConduitT p) = go p
+  where
+    -- This function is the same as @Pipe.unconsM@ but it ignores leftovers.
+    go (HaveOutput p o) = pure $ Just (o, SealedConduitT p)
+    go (NeedInput _ c) = go $ c ()
+    go (Done ()) = pure Nothing
+    go (PipeM mp) = mp >>= go
+    go (Leftover p ()) = go p
+
+-- | Split a conduit into head and tail or return its result if it is done.
+--
+-- Note that you have to 'sealConduitT' it first.
+--
+-- Since 1.3.3
+unconsEitherM :: Monad m
+              => SealedConduitT () o m r
+              -> m (Either r (o, SealedConduitT () o m r))
+unconsEitherM (SealedConduitT p) = go p
+  where
+    -- This function is the same as @Pipe.unconsEitherM@ but it ignores leftovers.
+    go (HaveOutput p o) = pure $ Right (o, SealedConduitT p)
+    go (NeedInput _ c) = go $ c ()
+    go (Done r) = pure $ Left r
+    go (PipeM mp) = mp >>= go
+    go (Leftover p ()) = go p
+
 -- | Named function synonym for '.|'
 --
 -- Equivalent to '.|' and '=$='. However, the latter is
 -- deprecated and will be removed in a future version.
 --
 -- Since 1.2.3
-fuse :: Monad m => Conduit a m b -> ConduitM b c m r -> ConduitM a c m r
+fuse :: Monad m => ConduitT a b m () -> ConduitT b c m r -> ConduitT a c m r
 fuse = (=$=)
 
 -- | Combine two @Conduit@s together into a new @Conduit@ (aka 'fuse').
@@ -757,9 +796,9 @@ fuse = (=$=)
 --
 -- @since 1.2.8
 (.|) :: Monad m
-     => ConduitM a b m () -- ^ upstream
-     -> ConduitM b c m r -- ^ downstream
-     -> ConduitM a c m r
+     => ConduitT a b m () -- ^ upstream
+     -> ConduitT b c m r -- ^ downstream
+     -> ConduitT a c m r
 (.|) = fuse
 {-# INLINE (.|) #-}
 
@@ -827,7 +866,7 @@ ConduitT left0 =$= ConduitT right0 = ConduitT $ \rest ->
 -- also return @Nothing@.
 --
 -- Since 0.5.0
-await :: Monad m => Consumer i m (Maybe i)
+await :: Monad m => ConduitT i o m (Maybe i)
 await = ConduitT $ \f -> NeedInput (f . Just) (const $ f Nothing)
 {-# INLINE [0] await #-}
 
@@ -1014,14 +1053,14 @@ mapInputM f f' (ConduitT c0) = ConduitT $ \rest -> let
 -- Mnemonic: connect + do more.
 --
 -- Since 0.5.0
-($$+) :: Monad m => Source m a -> Sink a m b -> m (SealedConduitT () a m (), b)
+($$+) :: Monad m => ConduitT () a m () -> ConduitT a Void m b -> m (SealedConduitT () a m (), b)
 src $$+ sink = connectResume (sealConduitT src) sink
 {-# INLINE ($$+) #-}
 
 -- | Continue processing after usage of @$$+@.
 --
 -- Since 0.5.0
-($$++) :: Monad m => SealedConduitT () a m () -> Sink a m b -> m (SealedConduitT () a m (), b)
+($$++) :: Monad m => SealedConduitT () a m () -> ConduitT a Void m b -> m (SealedConduitT () a m (), b)
 ($$++) = connectResume
 {-# INLINE ($$++) #-}
 
@@ -1032,7 +1071,7 @@ src $$+ sink = connectResume (sealConduitT src) sink
 -- run. Since version 1.3.0, there are no finalizers in conduit.
 --
 -- Since 0.5.0
-($$+-) :: Monad m => SealedConduitT () a m () -> Sink a m b -> m b
+($$+-) :: Monad m => SealedConduitT () a m () -> ConduitT a Void m b -> m b
 rsrc $$+- sink = do
     (_, res) <- connectResume rsrc sink
     return res
@@ -1041,7 +1080,7 @@ rsrc $$+- sink = do
 -- | Left fusion for a sealed source.
 --
 -- Since 1.0.16
-($=+) :: Monad m => SealedConduitT () a m () -> Conduit a m b -> SealedConduitT () b m ()
+($=+) :: Monad m => SealedConduitT () a m () -> ConduitT a b m () -> SealedConduitT () b m ()
 SealedConduitT src $=+ ConduitT sink = SealedConduitT (src `pipeL` sink Done)
 
 -- | Provide for a stream of data that can be flushed.
@@ -1063,7 +1102,7 @@ instance Functor Flush where
 -- producing output.
 --
 -- Since 1.0.13
-newtype ZipSource m o = ZipSource { getZipSource :: Source m o }
+newtype ZipSource m o = ZipSource { getZipSource :: ConduitT () o m () }
 
 instance Monad m => Functor (ZipSource m) where
     fmap f = ZipSource . mapOutput f . getZipSource
@@ -1079,7 +1118,7 @@ instance Monad m => Applicative (ZipSource m) where
 -- multiple sources, use `sequence_`.
 --
 -- Since 1.0.13
-sequenceSources :: (Traversable f, Monad m) => f (Source m o) -> Source m (f o)
+sequenceSources :: (Traversable f, Monad m) => f (ConduitT () o m ()) -> ConduitT () (f o) m ()
 sequenceSources = getZipSource . sequenceA . fmap ZipSource
 
 -- | A wrapper for defining an 'Applicative' instance for 'Sink's which allows
@@ -1089,7 +1128,7 @@ sequenceSources = getZipSource . sequenceA . fmap ZipSource
 --
 -- @
 -- sequenceSinks :: (Monad m)
---           => [Sink i m r] -> Sink i m [r]
+--           => [ConduitT i Void m r] -> ConduitT i Void m [r]
 -- sequenceSinks = getZipSink . sequenceA . fmap ZipSink
 -- @
 --
@@ -1104,7 +1143,7 @@ sequenceSources = getZipSource . sequenceA . fmap ZipSource
 -- understood).
 --
 -- Since 1.0.13
-newtype ZipSink i m r = ZipSink { getZipSink :: Sink i m r }
+newtype ZipSink i m r = ZipSink { getZipSink :: ConduitT i Void m r }
 
 instance Monad m => Functor (ZipSink i m) where
     fmap f (ZipSink x) = ZipSink (liftM f x)
@@ -1119,7 +1158,7 @@ instance Monad m => Applicative (ZipSink i m) where
 -- Implemented on top of @ZipSink@, see that data type for more details.
 --
 -- Since 1.0.13
-sequenceSinks :: (Traversable f, Monad m) => f (Sink i m r) -> Sink i m (f r)
+sequenceSinks :: (Traversable f, Monad m) => f (ConduitT i Void m r) -> ConduitT i Void m (f r)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
 
 -- | The connect-and-resume operator. This does not close the @Conduit@, but
@@ -1245,7 +1284,7 @@ fuseBothMaybe (ConduitT up) (ConduitT down) =
 -- @Conduit@. Same caveats of forced consumption apply.
 --
 -- Since 1.1.5
-fuseUpstream :: Monad m => ConduitT a b m r -> Conduit b m c -> ConduitT a c m r
+fuseUpstream :: Monad m => ConduitT a b m r -> ConduitT b c m () -> ConduitT a c m r
 fuseUpstream up down = fmap fst (fuseBoth up down)
 {-# INLINE fuseUpstream #-}
 
