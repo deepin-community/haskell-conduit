@@ -8,15 +8,12 @@
 -- Higher-level functions to interact with the elements of a stream. Most of
 -- these are based on list functions.
 --
--- For many purposes, it's recommended to use the conduit-combinators library,
--- which provides a more complete set of functions.
---
 -- Note that these functions all deal with individual elements of a stream as a
 -- sort of \"black box\", where there is no introspection of the contained
 -- elements. Values such as @ByteString@ and @Text@ will likely need to be
 -- treated specially to deal with their contents properly (@Word8@ and @Char@,
--- respectively). See the "Data.Conduit.Binary" and "Data.Conduit.Text"
--- modules.
+-- respectively). See the @Data.Conduit.Binary@ and @Data.Conduit.Text@
+-- modules in the @conduit-extra@ package.
 module Data.Conduit.List
     ( -- * Sources
       sourceList
@@ -33,6 +30,8 @@ module Data.Conduit.List
       -- ** Pure
     , fold
     , foldMap
+    , uncons
+    , unconsEither
     , take
     , drop
     , head
@@ -42,6 +41,8 @@ module Data.Conduit.List
       -- ** Monadic
     , foldMapM
     , foldM
+    , unconsM
+    , unconsEitherM
     , mapM_
       -- * Conduits
       -- ** Pure
@@ -95,9 +96,11 @@ import Prelude
 import Data.Monoid (Monoid, mempty, mappend)
 import qualified Data.Foldable as F
 import Data.Conduit
+import Data.Conduit.Internal.Conduit (unconsM, unconsEitherM)
 import Data.Conduit.Internal.Fusion
 import Data.Conduit.Internal.List.Stream
 import qualified Data.Conduit.Internal as CI
+import Data.Functor.Identity (Identity (runIdentity))
 import Control.Monad (when, (<=<), liftM, void)
 import Control.Monad.Trans.Class (lift)
 
@@ -179,6 +182,26 @@ unfoldEitherMC f =
             Right (a, seed') -> yield a >> go seed'
             Left r -> return r
 STREAMING(unfoldEitherM, unfoldEitherMC, unfoldEitherMS, f seed)
+
+-- | Split a pure conduit into head and tail.
+-- This is equivalent to @runIdentity . unconsM@.
+--
+-- Note that you have to 'sealConduitT' it first.
+--
+-- Since 1.3.3
+uncons :: SealedConduitT () o Identity ()
+       -> Maybe (o, SealedConduitT () o Identity ())
+uncons = runIdentity . unconsM
+
+-- | Split a pure conduit into head and tail or return its result if it is done.
+-- This is equivalent to @runIdentity . unconsEitherM@.
+--
+-- Note that you have to 'sealConduitT' it first.
+--
+-- Since 1.3.3
+unconsEither :: SealedConduitT () o Identity r
+             -> Either r (o, SealedConduitT () o Identity r)
+unconsEither = runIdentity . unconsEitherM
 
 -- | Yield the values from the list.
 --
@@ -440,7 +463,7 @@ STREAMING(map, mapC, mapS, f)
 {-
 {-# RULES "conduit: source/map fusion .|" forall f src. src .| map f = mapFuseRight src f #-}
 
-mapFuseRight :: Monad m => Source m a -> (a -> b) -> Source m b
+mapFuseRight :: Monad m => ConduitT () a m () -> (a -> b) -> ConduitT () b m ()
 mapFuseRight src f = CIC.mapOutput f src
 {-# INLINE mapFuseRight #-}
 -}

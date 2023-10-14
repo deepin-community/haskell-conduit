@@ -1,5 +1,29 @@
 # ChangeLog for conduit
 
+## 1.3.4.3
+
+* Fix space leak in `*>` [#496](https://github.com/snoyberg/conduit/issues/496) [#497](https://github.com/snoyberg/conduit/pull/497)
+
+## 1.3.4.2
+
+* Fix GHC 9.2 build [#473](https://github.com/snoyberg/conduit/pull/473)
+
+## 1.3.4.1
+
+* Library and tests compile and run with GHC 9.0.1 [#455](https://github.com/snoyberg/conduit/pull/455)
+
+## 1.3.4
+
+* Add `foldWhile` [#453](https://github.com/snoyberg/conduit/issues/453) [#456](https://github.com/snoyberg/conduit/pull/456).
+
+## 1.3.3
+
+* Add `uncons`, `unconsM`, `unconsEither`, `unconsEitherM`.
+
+## 1.3.2.1
+
+* Fix isChunksForExactlyE [#445](https://github.com/snoyberg/conduit/issues/445) [#446](https://github.com/snoyberg/conduit/pull/446)
+
 ## 1.3.2
 
 * Add `mapInputM` [#435](https://github.com/snoyberg/conduit/pull/435)
